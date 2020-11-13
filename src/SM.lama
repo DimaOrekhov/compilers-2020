@@ -23,7 +23,7 @@ public fun showSMInsn (i) {
     | Glb (x) -> x
     esac
   }
-  
+
   case i of
     READ             -> "READ"
   | WRITE            -> "WRITE"
@@ -41,7 +41,7 @@ public fun showSMInsn (i) {
   | GLOBAL (x)       -> sprintf ("GLOBAL %s", x)
   | END              -> sprintf ("END")
   | DUP              -> "DUP"
-  | DROP             -> "DROP"  
+  | DROP             -> "DROP"
   esac
 }
 
@@ -77,7 +77,7 @@ fun fromLabel (env, lab) {
 fun eval (env, w, insns) {
   -- Global state maps names of global variables to values
   local globalState = ref (fun (x) {error (sprintf ("name ""%s"" is undefined", x), getLoc (x))});
-  
+
   -- Make a fresh local state: a pair of arrays for arguments and local variables;
   -- takes the numbers of arguments and local variables respectively
   fun makeState (a, l) {
@@ -90,7 +90,7 @@ fun eval (env, w, insns) {
       Arg (i) -> args[i]
     | Loc (i) -> locs[i]
     | Glb (x) -> deref (globalState) (x)
-    esac 
+    esac
   }
 
   -- Assigns a value to a location
@@ -119,10 +119,50 @@ fun eval (env, w, insns) {
   -- Core interpreter: takes a configuration and a program, returns a configuration
   (* Assignment *)
   fun eval (c@[st, cst, s, w], insns) {
-    failure ("SM interpreter is not implemented\n")
+      case insns of
+        instruction:insnsTail ->
+          case evalInstruction (env, c, instruction) of
+            [newC, Nothing]        -> eval (env, newC, insnsTail)
+          | [newC, Just (newTail)] -> eval (env, newC, newTail)
+          esac
+      | {}                    -> c
+      esac
+  }
+
+  fun evalInstruction (env, conf@[stack, state, world], instruction) {
+    local newTail = Nothing;
+    [case instruction of
+      CONST (val)  -> [val:stack, state, world]
+    | LD (name)    -> [state(name):stack, state, world]
+    | ST (name)    -> case stack of
+                        x:stackTail -> [stackTail, state <- [name, x], world]
+                      esac
+    | BINOP (op)   -> case stack of
+                        x:y:stackTail -> [evalOp (op, y, x):stackTail, state, world]
+                      esac
+    | READ         -> case readWorld (world) of
+                       [value, newWorld] -> [value:stack, state, newWorld]
+                      esac
+    | WRITE        -> case stack of
+                       value:stackTail -> [stackTail, state, writeWorld (value, world)]
+                      esac
+    | LABEL (s)    -> conf
+    | JMP   (l)    -> newTail := Just (env.fromLabel(l)); conf
+    | CJMP  (c, l) -> newTail := case stack of
+                        x:stackTail -> if c.shouldJump(x) then Just (env.fromLabel(l)) else Nothing fi
+                      esac;
+                      conf
+    esac, newTail]
+  }
+
+  fun shouldJump(cjmpType, x) {
+    case cjmpType of
+      Z  -> x == 0
+    | NZ -> x != 0
+    esac
   }
   (* End *)
-  
+
   eval ([{}, {}, makeState (0, 0), w], insns) [3].getOutput
 }
 
@@ -138,7 +178,7 @@ fun makeCompEnv (nLabels, scopeDepth, state, nLocals, nArgs, functions) {
     [sprintf ("L%d", nLabels), makeCompEnv (nLabels+1, scopeDepth, state, nLocals, nArgs, functions)]
   }
 
-  -- Adds a new function 
+  -- Adds a new function
   fun rememberFun (fLabel, args, body) {
     makeCompEnv (nLabels,
                  scopeDepth,
@@ -175,7 +215,7 @@ fun makeCompEnv (nLabels, scopeDepth, state, nLocals, nArgs, functions) {
   fun addFun (name, fLabel, nargs) {
     makeCompEnv (nLabels, scopeDepth, addName (state, name, Fun (fLabel, nargs)), nLocals, nArgs, functions)
   }
-  
+
   -- Enters a function
   fun beginFun (state) {
     makeCompEnv (nLabels, 1, enterFunction (state), 0, 0, functions)
@@ -212,14 +252,14 @@ fun makeCompEnv (nLabels, scopeDepth, state, nLocals, nArgs, functions) {
      if scopeDepth == 1
      then [sprintf ("L%s", name),             makeCompEnv (nLabels  , scopeDepth, state, nLocals, nArgs, functions)]
      else [sprintf ("L%s_%d", name, nLabels), makeCompEnv (nLabels+1, scopeDepth, state, nLocals, nArgs, functions)]
-     fi 
+     fi
   }
 
   -- Checks if the current scope is a global
   fun isGlobal () {
     scopeDepth == 1
   }
-  
+
   [genLabel,
    rememberFun,
    beginScope,
@@ -323,8 +363,25 @@ fun addVars (env, names) {
   foldl (fun (env, name) {addVar (env, name)}, env, names)
 }
 
+-- Just an utility operator to append a single element to list
+infix ++$ at +++ (lst, elem) {
+  lst +++ singleton (elem)
+}
+
 -- Compiles an expression into a stack machine code.
 -- Takes an expression, returns a list of stack machine
+-- Takes an expression, returns a list (of, possibly, lists)
+-- of stack machine instructions
+fun compileExpr (expr) {
+  case expr of
+    Const (val)             -> singleton (CONST (val))
+  | Var (name)              -> singleton (LD (name))
+  | Binop (op, left, right) -> compileExpr (left) +++ compileExpr (right) ++$ BINOP (op)
+  esac
+}
+
+-- Compiles a statement into a stack machine code.
+-- Takes a statement, returns a list of stack machine
 -- instructions.
 
 (* Assignment *)
@@ -349,6 +406,91 @@ fun addVars (env, names) {
 --    (use env.addArg).
 
 public fun compileSM (expr) {
-  failure ("compileSM not implemented\n")
+  compileSMInner (stmt, initCompEnv(), Nothing) [0]
+}
+
+
+fun compileSMInner (stmt, compEnv, returnPoint) {
+  local envToReturn = compEnv;
+  [case stmt of
+    Assn (name, expr)   -> compileExpr (expr) ++$ ST (name)
+  | Seq  (stmt1, stmt2) ->
+    case compileSMInner (stmt1, compEnv, Nothing) of
+      [stmtCode1, newCompEnv] ->
+        case compileSMInner (stmt2, newCompEnv, returnPoint) of
+          [stmtCode2, newerCompEnv] ->
+            envToReturn := newerCompEnv;
+            stmtCode1 +++ stmtCode2
+        esac
+    esac
+  | Skip                -> {}
+  | Read (name)         -> {READ, ST (name)}
+  | Write (expr)        -> compileExpr (expr) ++$ WRITE
+  | s@If (expr, stmt1, stmt2) ->
+    case returnPoint of
+      Just (point) ->
+        case compEnv.genLabels (1) of
+          [beginElse, newCompEnv] ->
+            case generateIfCode (s, beginElse, point, newCompEnv) of
+              [code, newerEnv] ->
+                envToReturn := newerEnv;
+                code
+            esac
+        esac
+    | Nothing     ->
+        case compEnv.genLabels (2) of
+          [beginElse, point, newCompEnv] ->
+            case generateIfCode (s, beginElse, point, newCompEnv) of
+              [code, newerEnv] ->
+                envToReturn := newerEnv;
+                code
+                ++$ LABEL (point)
+            esac
+        esac
+    esac
+  | While (expr, body) ->
+    case compEnv.genLabels (2) of
+      [beginCondition, beginStatement, newCompEnv] ->
+        case compileSMInner (body, newCompEnv, returnPoint) of
+          [bodyCode, newerCompEnv] ->
+            envToReturn := newerCompEnv;
+            singleton (JMP (beginCondition))
+            ++$ LABEL (beginStatement)
+            +++ bodyCode
+            ++$ LABEL (beginCondition)
+            +++ compileExpr (expr)
+            ++$ CJMP (NZ, beginStatement)
+        esac
+    esac
+  | Repeat (body, expr) ->
+    case compEnv.genLabels (1) of
+      [beginStatement, newCompEnv] ->
+        case compileSMInner (body, newCompEnv, returnPoint) of
+          [bodyCode, newerCompEnv] ->
+            envToReturn := newerCompEnv;
+            singleton (LABEL (beginStatement))
+            +++ bodyCode
+            +++ compileExpr (expr)
+            ++$ CJMP (Z, beginStatement)
+        esac
+    esac
+  esac, envToReturn]
+}
+
+fun generateIfCode (If(expr, stmt1, stmt2), beginElse, returnPoint, env) {
+    local envToReturn = env;
+    [case compileSMInner (stmt1, env, Just (returnPoint)) of
+      [stmtCode1, newCompEnv] ->
+        case compileSMInner (stmt2, newCompEnv, Just (returnPoint)) of
+          [stmtCode2, newerCompEnv] ->
+            envToReturn := newerCompEnv;
+            compileExpr(expr)
+            ++$ CJMP (Z, beginElse)
+            +++ stmtCode1
+            ++$ JMP (returnPoint)
+            ++$ LABEL (beginElse)
+            +++ stmtCode2
+        esac
+    esac, envToReturn]
 }
 (* End *)
