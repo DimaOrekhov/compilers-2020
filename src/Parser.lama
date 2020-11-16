@@ -137,9 +137,9 @@ local primary    = memo $ eta syntax (
       scopeExpr  = memo $ eta syntax (ds=definition* e=exp? {fun (a) {fun (e) {
                                                                         case ds of
                                                                           {} -> e
-                                                                        | _  -> expandScope (ds, e) 
+                                                                        | _  -> expandScope (ds, e)
                                                                         esac
-                                                                      } (case e of 
+                                                                      } (case e of
                                                                            Some (e) -> e (a)
                                                                          | _        -> Skip
                                                                          esac)
@@ -150,7 +150,7 @@ local primary    = memo $ eta syntax (
                                            body=inbr[s("{"), scopeExpr, s("}")] {
                                            Fun (name, args, body (Weak))
                                       }
-                                     ),                                    
+                                     ),
       exp        = memo $ eta syntax (basic | s1=basic s[";"] s2=exp {fun (a) {Seq (s1 (Void), s2 (a))}});
 
 -- Public top-level parser
